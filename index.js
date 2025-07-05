@@ -71,7 +71,7 @@ async function sendWechatNotice(webhookUrl, text) {
   }
 }
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`🚀 队列服务已启动，监听端口 ${PORT}`);
 });
