@@ -31,19 +31,27 @@ app.post('/process', async (req, res) => {
     return res.json({ status: '⏳ No tasks in queue' });
   }
 
-  const task = JSON.parse(taskData);
-  console.log('🟡 正在处理任务:', task);
+  let task;
+
+  try {
+    // 解析 JSON
+    task = typeof taskData === 'string' ? JSON.parse(taskData) : taskData;
+  } catch (err) {
+    console.error('❌ JSON 解析失败:', taskData);
+    return res.status(500).json({ error: '任务格式不正确（不是合法 JSON）', raw: taskData });
+  }
+
+  console.log('🟡 处理任务:', task);
 
   try {
     if (task.type === 'wechat') {
       if (!task.webhookUrl || !task.text) {
-        throw new Error('Missing webhookUrl or text');
+        throw new Error('Missing webhookUrl or text in wechat task');
       }
       await sendWechatNotice(task.webhookUrl, task.text);
-      return res.json({ status: '✅ 微信任务完成', task });
+      return res.json({ status: '✅ 微信任务已完成', task });
     }
 
-    // 其他类型任务可扩展
     return res.json({ status: '⚠️ 未知任务类型', task });
 
   } catch (err) {
@@ -51,6 +59,7 @@ app.post('/process', async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
+
 
 // 使用 Node.js 原生 fetch 发送企业微信通知
 async function sendWechatNotice(webhookUrl, text) {
