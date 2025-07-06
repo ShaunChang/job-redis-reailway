@@ -1,5 +1,6 @@
 const express = require('express');
 const { Redis } = require('@upstash/redis');
+const fetch = require('node-fetch');
 
 const app = express();
 app.use(express.json());
@@ -13,11 +14,9 @@ const redis = new Redis({
 // 添加任务到队列
 app.post('/enqueue', async (req, res) => {
   const task = req.body;
-
   if (!task || !task.type) {
     return res.status(400).json({ error: 'Missing task type or data' });
   }
-
   await redis.lpush('task_queue', JSON.stringify(task));
   console.log('✅ 入队任务:', task.type);
   res.json({ status: 'Task enqueued', task });
@@ -26,15 +25,12 @@ app.post('/enqueue', async (req, res) => {
 // 处理队列中的任务
 app.post('/process', async (req, res) => {
   const taskData = await redis.rpop('task_queue');
-
   if (!taskData) {
     return res.json({ status: '⏳ No tasks in queue' });
   }
 
   let task;
-
   try {
-    // 解析 JSON
     task = typeof taskData === 'string' ? JSON.parse(taskData) : taskData;
   } catch (err) {
     console.error('❌ JSON 解析失败:', taskData);
@@ -50,33 +46,104 @@ app.post('/process', async (req, res) => {
       }
       await sendWechatNotice(task.webhookUrl, task.text);
       return res.json({ status: '✅ 微信任务已完成', task });
+    } else if (task.type === 'notion_insert') {
+      if (!task.name || !task.message || !Array.isArray(task.array) || !task.notionApiKey || !task.databaseId || !task.wechatWebhookUrl) {
+        throw new Error('Missing required fields for notion_insert task');
+      }
+      const notionResult = await insertToNotion(task);
+      return res.json({ status: '✅ Notion 插入任务完成', result: notionResult });
     }
 
     return res.json({ status: '⚠️ 未知任务类型', task });
-
   } catch (err) {
     console.error('❌ 任务处理失败:', err.message);
     return res.status(500).json({ error: err.message });
   }
 });
 
-
-// 使用 Node.js 原生 fetch 发送企业微信通知
 async function sendWechatNotice(webhookUrl, text) {
   try {
     const response = await fetch(webhookUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        msgtype: "text",
-        text: { content: text }
-      })
+        msgtype: 'text',
+        text: { content: text },
+      }),
     });
-
     const result = await response.json();
     console.log('📨 微信通知返回:', result);
   } catch (err) {
     console.error('❌ 微信通知失败:', err.message);
+  }
+}
+
+async function insertToNotion({ notionApiKey, databaseId, array, wechatWebhookUrl, message, name }) {
+  const results = [];
+  for (const item of array) {
+    let attempt = 0;
+    let inserted = false;
+    while (attempt < 3 && !inserted) {
+      try {
+        const res = await fetch("https://api.notion.com/v1/pages", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${notionApiKey}`,
+            "Content-Type": "application/json",
+            "Notion-Version": "2022-06-28"
+          },
+          body: JSON.stringify({
+            parent: { database_id: databaseId },
+            properties: item.properties
+          })
+        });
+
+        const json = await res.json();
+
+        if (res.status === 429) {
+          const retryAfter = parseInt(res.headers.get('Retry-After') || '2', 10);
+          console.warn(`⚠️ 第 ${attempt + 1} 次请求限流，等待 ${retryAfter} 秒重试...`);
+          await delay(retryAfter * 1000);
+          attempt++;
+          continue;
+        }
+
+        if (res.ok) {
+          results.push({ status: "success", pageId: json.id, url: json.url });
+          inserted = true;
+        } else {
+          const errorMsg = json.message || "Unknown error";
+          await sendWechatNotice(wechatWebhookUrl, `❗插入失败：${getTitle(item)}\n原因：${errorMsg}`);
+          results.push({ status: "error", message: errorMsg });
+          break;
+        }
+      } catch (err) {
+        await sendWechatNotice(wechatWebhookUrl, `❗插入失败：${getTitle(item)}\n系统异常：${err.message}`);
+        results.push({ status: "error", message: err.message });
+        break;
+      }
+    }
+  }
+
+  const successCount = results.filter(r => r.status === "success").length;
+  const errorCount = results.length - successCount;
+  const finalNotice = errorCount > 0
+    ? `⚠️ 插入完成：${successCount} 成功 / ${errorCount} 失败。\n📨 城市岗位：${name} ${message}`
+    : `✅ 全部插入成功，共 ${successCount} 条。\n📨 城市岗位：${name} ${message}`;
+
+  await sendWechatNotice(wechatWebhookUrl, finalNotice);
+  return { ret: results };
+}
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function getTitle(item) {
+  try {
+    return item.properties?.Company?.title?.[0]?.text?.content || '未命名';
+  } catch {
+    return '未知项';
   }
 }
 
