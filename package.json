@@ -11,6 +11,7 @@
   "description": "",
   "dependencies": {
     "@upstash/redis": "^1.35.1",
+    "node-fetch": "^2.x.x",
     "express": "^5.1.0"
   }
 }
