@@ -22,44 +22,64 @@ app.post('/enqueue', async (req, res) => {
   res.json({ status: 'Task enqueued', task });
 });
 
-// 处理队列中的任务
+// 处理队列中的任务（带锁 + while）
 app.post('/process', async (req, res) => {
-  const taskData = await redis.rpop('task_queue');
-  if (!taskData) {
-    return res.json({ status: '⏳ No tasks in queue' });
+  const lockKey = 'processing_lock';
+
+  // 设置锁，nx: key不存在才设置；ex: 自动过期秒数
+  const locked = await redis.set(lockKey, '1', { nx: true, ex: 60 });
+
+  if (!locked) {
+    return res.json({ status: '⏳ 正在处理任务中，跳过本次触发' });
   }
 
-  let task;
-  try {
-    task = typeof taskData === 'string' ? JSON.parse(taskData) : taskData;
-  } catch (err) {
-    console.error('❌ JSON 解析失败:', taskData);
-    return res.status(500).json({ error: '任务格式不正确（不是合法 JSON）', raw: taskData });
-  }
-
-  console.log('🟡 处理任务:', task);
+  let processed = 0;
 
   try {
-    if (task.type === 'wechat') {
-      if (!task.webhookUrl || !task.text) {
-        throw new Error('Missing webhookUrl or text in wechat task');
+    while (true) {
+      const taskData = await redis.rpop('task_queue');
+      if (!taskData) break;
+
+      let task;
+      try {
+        task = typeof taskData === 'string' ? JSON.parse(taskData) : taskData;
+      } catch (err) {
+        console.error('❌ JSON 解析失败:', taskData);
+        continue;
       }
-      await sendWechatNotice(task.webhookUrl, task.text);
-      return res.json({ status: '✅ 微信任务已完成', task });
-    } else if (task.type === 'notion_insert') {
-      if (!task.name || !task.message || !Array.isArray(task.array) || !task.notionApiKey || !task.databaseId || !task.wechatWebhookUrl) {
-        throw new Error('Missing required fields for notion_insert task');
+
+      console.log('🟡 正在处理任务:', task);
+
+      try {
+        if (task.type === 'wechat') {
+          if (!task.webhookUrl || !task.text) {
+            throw new Error('Missing webhookUrl or text in wechat task');
+          }
+          await sendWechatNotice(task.webhookUrl, task.text);
+
+        } else if (task.type === 'notion_insert') {
+          if (!task.name || !task.message || !Array.isArray(task.array) ||
+              !task.notionApiKey || !task.databaseId || !task.wechatWebhookUrl) {
+            throw new Error('Missing required fields for notion_insert task');
+          }
+          await insertToNotion(task);
+
+        } else {
+          console.warn('⚠️ 未知任务类型:', task.type);
+        }
+
+        processed++;
+      } catch (err) {
+        console.error('❌ 任务处理失败:', err.message);
       }
-      const notionResult = await insertToNotion(task);
-      return res.json({ status: '✅ Notion 插入任务完成', result: notionResult });
     }
-
-    return res.json({ status: '⚠️ 未知任务类型', task });
-  } catch (err) {
-    console.error('❌ 任务处理失败:', err.message);
-    return res.status(500).json({ error: err.message });
+  } finally {
+    await redis.del(lockKey); // 释放锁
   }
+
+  res.json({ status: `✅ 已处理 ${processed} 个任务` });
 });
+
 
 async function sendWechatNotice(webhookUrl, text) {
   try {
