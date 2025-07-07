@@ -3,7 +3,7 @@ const { Redis } = require('@upstash/redis');
 const fetch = require('node-fetch');
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '5mb' }));
 
 // 初始化 Redis 客户端
 const redis = new Redis({
