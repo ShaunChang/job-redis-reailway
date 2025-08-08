@@ -26,9 +26,7 @@ app.post('/enqueue', async (req, res) => {
 app.post('/process', async (req, res) => {
   const lockKey = 'processing_lock';
 
-  // 设置锁，nx: key不存在才设置；ex: 自动过期秒数
   const locked = await redis.set(lockKey, '1', { nx: true, ex: 60 });
-
   if (!locked) {
     return res.json({ status: '⏳ 正在处理任务中，跳过本次触发' });
   }
@@ -64,6 +62,12 @@ app.post('/process', async (req, res) => {
           }
           await insertToNotion(task);
 
+        } else if (task.type === 'supabase_insert_job') {
+          if (!task.apiKey || !task.supabaseUrl || !task.payload || !task.wechatWebhookUrl) {
+            throw new Error('Missing required fields for supabase_insert_job task');
+          }
+          await insertToSupabase(task);
+
         } else {
           console.warn('⚠️ 未知任务类型:', task.type);
         }
@@ -74,13 +78,13 @@ app.post('/process', async (req, res) => {
       }
     }
   } finally {
-    await redis.del(lockKey); // 释放锁
+    await redis.del(lockKey);
   }
 
   res.json({ status: `✅ 已处理 ${processed} 个任务` });
 });
 
-
+// 微信通知
 async function sendWechatNotice(webhookUrl, text) {
   try {
     const response = await fetch(webhookUrl, {
@@ -98,6 +102,7 @@ async function sendWechatNotice(webhookUrl, text) {
   }
 }
 
+// 插入 Notion
 async function insertToNotion({ notionApiKey, databaseId, array, wechatWebhookUrl, message, name }) {
   const results = [];
   for (const item of array) {
@@ -155,6 +160,35 @@ async function insertToNotion({ notionApiKey, databaseId, array, wechatWebhookUr
   return { ret: results };
 }
 
+// 插入 Supabase job 表
+async function insertToSupabase({ apiKey, supabaseUrl, payload, wechatWebhookUrl }) {
+  try {
+    const res = await fetch(`${supabaseUrl}/rest/v1/job`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "apikey": apiKey,
+        "Authorization": `Bearer ${apiKey}`,
+        "Prefer": "return=representation"
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      const msg = data.message || "未知错误";
+      await sendWechatNotice(wechatWebhookUrl, `❌ Supabase 插入失败：${msg}`);
+      return;
+    }
+
+    await sendWechatNotice(wechatWebhookUrl, `✅ Supabase 插入成功，ID: ${data[0]?.id}`);
+  } catch (err) {
+    await sendWechatNotice(wechatWebhookUrl, `❌ Supabase 插入异常：${err.message}`);
+  }
+}
+
+// 工具函数
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
