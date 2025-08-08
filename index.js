@@ -68,6 +68,8 @@ app.post('/process', async (req, res) => {
           }
           await insertToSupabase(task);
 
+        } else if (task.type === 'supabase_insert_job_batch') {
+          await insertSupabaseBatch(task);
         } else {
           console.warn('⚠️ 未知任务类型:', task.type);
         }
@@ -159,6 +161,34 @@ async function insertToNotion({ notionApiKey, databaseId, array, wechatWebhookUr
   await sendWechatNotice(wechatWebhookUrl, finalNotice);
   return { ret: results };
 }
+
+//批量插入
+async function insertSupabaseBatch({ apiKey, supabaseUrl, payload, wechatWebhookUrl }) {
+  try {
+    const res = await fetch(`${supabaseUrl}/rest/v1/job`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "apikey": apiKey,
+        "Authorization": `Bearer ${apiKey}`,
+        "Prefer": "return=representation"
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const json = await res.json();
+
+    if (!res.ok) {
+      await sendWechatNotice(wechatWebhookUrl, `❌ 批量插入失败：${json.message || '未知错误'}`);
+      return;
+    }
+
+    await sendWechatNotice(wechatWebhookUrl, `✅ 批量插入成功，共 ${json.length} 条`);
+  } catch (err) {
+    await sendWechatNotice(wechatWebhookUrl, `❌ Supabase 异常：${err.message}`);
+  }
+}
+
 
 // 插入 Supabase job 表
 async function insertToSupabase({ apiKey, supabaseUrl, payload, wechatWebhookUrl }) {
